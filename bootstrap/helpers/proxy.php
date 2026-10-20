@@ -328,6 +328,33 @@ function dockerNetworkEnsureCommand(string $network, bool $overlay = false, bool
     return "docker network inspect {$safe} >/dev/null 2>&1 || docker network create {$createFlags} {$safe}{$quiet}";
 }
 
+/**
+ * Create a bridge network that the proxy publishes its ports from, with IPv6 when the daemon can allocate it.
+ * Docker then maps host IPv6 ports to the proxy with DNAT, so the proxy sees the real IPv6 client address
+ * instead of the bridge gateway (#3436). Falls back to an IPv4-only network when IPv6 is not available, or when
+ * Docker reports the IPv6 gateway with a prefix length (Docker 27.0 to 28.0.0, moby/moby#49520), which the
+ * Docker CLI and Compose in the helper image cannot parse. Existing networks are not changed.
+ *
+ * One `sh -c` script that always exits 0, so parseCommandsByLineForSudo() only puts sudo in front.
+ * Pass it as is: a suffix such as `|| true` makes it add sudo inside the script.
+ */
+function dockerProxyNetworkEnsureCommand(string $network): string
+{
+    $script = 'net='.escapeshellarg($network)."\n".<<<'SH'
+docker network inspect "$net" >/dev/null 2>&1 && exit 0
+if docker network create --attachable --ipv6 "$net" >/dev/null 2>&1; then
+    case "$(docker network inspect --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' "$net")" in
+        */*) docker network rm "$net" >/dev/null && docker network create --attachable "$net" >/dev/null ;;
+    esac
+else
+    docker network create --attachable "$net" >/dev/null
+fi
+exit 0
+SH;
+
+    return 'sh -c '.escapeShellValue($script);
+}
+
 function collectProxyDockerNetworksByServer(Server $server)
 {
     if (! $server->isFunctional()) {
